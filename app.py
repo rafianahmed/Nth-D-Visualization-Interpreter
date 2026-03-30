@@ -15,42 +15,45 @@ if "comparison_history" not in st.session_state:
     st.session_state.comparison_history = []
 
 
-# ---------------------------
+# =========================
 # Helper Functions
-# ---------------------------
+# =========================
 def interpret_nd(df, selected_cols):
     insights = []
 
     if len(selected_cols) < 2:
-        return ["Please select at least 2 dimensions for interpretation."]
+        return ["Please select at least 2 variables for interpretation."]
 
-    desc = df[selected_cols].describe().T
+    sub = df[selected_cols].dropna()
 
-    # variance-based insight
+    if sub.empty:
+        return ["The selected variables do not contain enough valid data."]
+
+    desc = sub.describe().T
+
     highest_var = desc["std"].idxmax()
     lowest_var = desc["std"].idxmin()
-    insights.append(f"'{highest_var}' shows the highest variability among selected dimensions.")
-    insights.append(f"'{lowest_var}' is the most stable dimension among selected dimensions.")
+    insights.append(f"{highest_var} shows the highest variability among the selected variables.")
+    insights.append(f"{lowest_var} is the most stable variable among the selected variables.")
 
-    # correlation-based insight
-    corr = df[selected_cols].corr()
+    corr = sub.corr()
     strong_pairs = []
     for i in range(len(selected_cols)):
         for j in range(i + 1, len(selected_cols)):
             c = corr.iloc[i, j]
-            if abs(c) >= 0.6:
+            if pd.notna(c) and abs(c) >= 0.6:
                 strong_pairs.append((selected_cols[i], selected_cols[j], c))
 
     if strong_pairs:
         for a, b, c in strong_pairs[:5]:
             direction = "positive" if c > 0 else "negative"
-            insights.append(f"'{a}' and '{b}' have a strong {direction} relationship ({c:.2f}).")
+            insights.append(f"{a} and {b} show a strong {direction} relationship ({c:.2f}).")
     else:
-        insights.append("No very strong linear relationships were detected among the selected dimensions.")
+        insights.append("No very strong linear relationships were found among the selected variables.")
 
-    # range-based insight
-    largest_range_col = (desc["max"] - desc["min"]).idxmax()
-    insights.append(f"'{largest_range_col}' has the widest value range in the selected dimensions.")
+    ranges = desc["max"] - desc["min"]
+    largest_range_col = ranges.idxmax()
+    insights.append(f"{largest_range_col} has the widest value range.")
 
     return insights
 
@@ -66,12 +69,9 @@ def confidence_score_nd(df, selected_cols):
     completeness = 100 * (1 - df[selected_cols].isna().mean().mean())
 
     corr = sub.corr().abs()
-    if len(selected_cols) > 1:
-        mask = np.triu(np.ones(corr.shape), k=1).astype(bool)
-        corr_vals = corr.where(mask).stack()
-        avg_corr = corr_vals.mean() if not corr_vals.empty else 0
-    else:
-        avg_corr = 0
+    mask = np.triu(np.ones(corr.shape), k=1).astype(bool)
+    corr_vals = corr.where(mask).stack()
+    avg_corr = corr_vals.mean() if not corr_vals.empty else 0
 
     variance_quality = sub.std().replace(0, np.nan).notna().mean()
 
@@ -85,76 +85,99 @@ def compare_nd_views(df, cols_a, cols_b):
     set_a = set(cols_a)
     set_b = set(cols_b)
 
-    only_a = list(set_a - set_b)
-    only_b = list(set_b - set_a)
-    common = list(set_a & set_b)
+    only_a = sorted(list(set_a - set_b))
+    only_b = sorted(list(set_b - set_a))
+    common = sorted(list(set_a & set_b))
 
     if only_a:
         diffs.append(f"Only in first selection: {', '.join(only_a)}")
     if only_b:
         diffs.append(f"Only in second selection: {', '.join(only_b)}")
     if common:
-        diffs.append(f"Common dimensions: {', '.join(common)}")
-
-    if len(common) >= 2:
-        corr_a = df[common].corr().mean().mean()
-        diffs.append(f"Shared-dimension average correlation structure is {corr_a:.2f}.")
+        diffs.append(f"Common variables: {', '.join(common)}")
 
     if len(cols_a) > len(cols_b):
-        diffs.append("The first selection covers more dimensions and may capture broader structure.")
+        diffs.append("The first view has more variables.")
     elif len(cols_b) > len(cols_a):
-        diffs.append("The second selection covers more dimensions and may capture broader structure.")
+        diffs.append("The second view has more variables.")
     else:
-        diffs.append("Both selections have the same dimensional size.")
+        diffs.append("Both views use the same number of variables.")
+
+    shared = [c for c in cols_a if c in cols_b]
+    if len(shared) >= 2:
+        shared_corr = df[shared].dropna().corr().abs()
+        mask = np.triu(np.ones(shared_corr.shape), k=1).astype(bool)
+        vals = shared_corr.where(mask).stack()
+        if not vals.empty:
+            diffs.append(f"The shared variables have an average absolute correlation of {vals.mean():.2f}.")
 
     return diffs
 
 
-def plot_pairwise_views(df, selected_cols, max_pairs=6):
+def plot_pairwise_views(df, selected_cols, block_key):
     pairs = list(itertools.combinations(selected_cols, 2))
+
     if not pairs:
         return
 
-    st.subheader("Pairwise Views")
-    for idx, (a, b) in enumerate(pairs[:max_pairs]):
+    st.subheader("Pairwise Scatter Plots")
+
+    max_pairs = min(len(pairs), 6)
+    for idx in range(max_pairs):
+        a, b = pairs[idx]
         fig = px.scatter(df, x=a, y=b, title=f"{a} vs {b}")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"pair_{block_key}_{idx}")
 
 
-def plot_3d_options(df, selected_cols):
+def plot_optional_3d(df, selected_cols, block_key):
     if len(selected_cols) < 3:
         return
 
-    st.subheader("3D Visualization")
+    st.subheader("3D View")
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        x3 = st.selectbox("3D X-axis", selected_cols, key="x3_main")
+        x3 = st.selectbox("3D X-axis", selected_cols, key=f"x3_{block_key}")
     with c2:
-        y3 = st.selectbox("3D Y-axis", selected_cols, index=min(1, len(selected_cols)-1), key="y3_main")
+        y3 = st.selectbox(
+            "3D Y-axis",
+            selected_cols,
+            index=min(1, len(selected_cols) - 1),
+            key=f"y3_{block_key}"
+        )
     with c3:
-        z3 = st.selectbox("3D Z-axis", selected_cols, index=min(2, len(selected_cols)-1), key="z3_main")
+        z3 = st.selectbox(
+            "3D Z-axis",
+            selected_cols,
+            index=min(2, len(selected_cols) - 1),
+            key=f"z3_{block_key}"
+        )
 
-    fig3d = px.scatter_3d(df, x=x3, y=y3, z=z3, opacity=0.7, title=f"3D View: {x3}, {y3}, {z3}")
-    st.plotly_chart(fig3d, use_container_width=True)
+    fig3d = px.scatter_3d(
+        df,
+        x=x3,
+        y=y3,
+        z=z3,
+        opacity=0.7,
+        title=f"{x3} vs {y3} vs {z3}"
+    )
+    st.plotly_chart(fig3d, use_container_width=True, key=f"plot3d_{block_key}")
 
 
-def render_selection_block(df, selected_cols, title_prefix="Selection"):
+def render_selection_block(df, selected_cols, title_prefix="Selection", block_key="default"):
     st.markdown(f"## {title_prefix}")
 
     if len(selected_cols) < 2:
-        st.warning("Please select at least 2 dimensions.")
+        st.warning("Please select at least 2 variables.")
         return
 
-    st.write(f"Selected dimensions: {', '.join(selected_cols)}")
+    st.write(f"Selected variables: {', '.join(selected_cols)}")
 
-    # Scatter Matrix
     st.subheader("Scatter Matrix")
     fig_matrix = px.scatter_matrix(df, dimensions=selected_cols)
     fig_matrix.update_layout(height=700)
-    st.plotly_chart(fig_matrix, use_container_width=True)
+    st.plotly_chart(fig_matrix, use_container_width=True, key=f"matrix_{block_key}")
 
-    # Correlation Heatmap
     st.subheader("Correlation Heatmap")
     corr = df[selected_cols].corr()
     fig_heat = px.imshow(
@@ -163,30 +186,25 @@ def render_selection_block(df, selected_cols, title_prefix="Selection"):
         aspect="auto",
         title="Correlation Heatmap"
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, use_container_width=True, key=f"heat_{block_key}")
 
-    # Pairwise views
-    plot_pairwise_views(df, selected_cols)
+    plot_pairwise_views(df, selected_cols, block_key)
+    plot_optional_3d(df, selected_cols, block_key)
 
-    # Optional 3D view
-    plot_3d_options(df, selected_cols)
-
-    # Interpretation
     st.subheader("Interpretation")
     raw_insights = interpret_nd(df, selected_cols)
     for item in raw_insights:
         st.markdown(f"- {item}")
 
-    # Confidence
     st.subheader("Confidence Score")
     conf = confidence_score_nd(df, selected_cols)
     st.progress(conf / 100)
     st.caption(f"Interpretation confidence: {conf}%")
 
 
-# ---------------------------
+# =========================
 # Main App
-# ---------------------------
+# =========================
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
     st.dataframe(df.head())
@@ -197,62 +215,76 @@ if uploaded_file:
         st.error("Need at least 2 numeric columns.")
         st.stop()
 
-    st.sidebar.header("Main N-Dimensional Controls")
+    st.sidebar.header("Main View Controls")
 
-    max_dims = len(numeric_cols)
-    n_dims = st.sidebar.slider(
-        "How many dimensions do you want to include?",
+    n_main = st.sidebar.number_input(
+        "How many variables do you want in the main view?",
         min_value=2,
-        max_value=max_dims,
-        value=min(4, max_dims)
+        max_value=len(numeric_cols),
+        value=min(3, len(numeric_cols)),
+        step=1
     )
 
-    default_main = numeric_cols[:n_dims]
+    default_main = numeric_cols[:int(n_main)]
+
     selected_dims = st.sidebar.multiselect(
-        "Select dimensions for main analysis",
+        "Select variables for main view",
         options=numeric_cols,
-        default=default_main
+        default=default_main,
+        max_selections=int(n_main)
     )
+
+    st.sidebar.caption(f"Please select exactly {int(n_main)} variables.")
 
     domain = st.sidebar.selectbox(
         "Domain Language",
         ["General", "Finance", "Supply Chain", "ML"]
     )
 
-    if len(selected_dims) >= 2:
-        enriched = enrich_language(interpret_nd(df, selected_dims), domain)
-        render_selection_block(df, selected_dims, "Main N-Dimensional Analysis")
+    if len(selected_dims) == int(n_main):
+        render_selection_block(
+            df,
+            selected_dims,
+            "Main Analysis",
+            block_key="main"
+        )
 
         st.subheader("Domain-Enriched Interpretation")
+        enriched = enrich_language(interpret_nd(df, selected_dims), domain)
         for item in enriched:
             st.markdown(f"- {item}")
     else:
-        st.warning("Select at least 2 dimensions for the main analysis.")
+        st.warning(f"Please select exactly {int(n_main)} variables for the main view.")
 
     st.divider()
-    st.header("Compare With Another N-Dimensional Selection")
+    st.header("Compare With Another Variable Set")
 
-    n_dims_2 = st.slider(
-        "How many dimensions for comparison?",
+    n_compare = st.number_input(
+        "How many variables do you want in the comparison view?",
         min_value=2,
-        max_value=max_dims,
-        value=min(4, max_dims),
-        key="compare_n_dims"
+        max_value=len(numeric_cols),
+        value=min(3, len(numeric_cols)),
+        step=1,
+        key="n_compare"
     )
 
-    default_compare = numeric_cols[:n_dims_2]
+    default_compare = numeric_cols[:int(n_compare)]
+
     selected_dims_2 = st.multiselect(
-        "Select dimensions for comparison analysis",
+        "Select variables for comparison view",
         options=numeric_cols,
         default=default_compare,
+        max_selections=int(n_compare),
         key="compare_dims"
     )
 
-    c1, c2 = st.columns([1, 1])
+    st.caption(f"Please select exactly {int(n_compare)} variables for the comparison view.")
+
+    c1, c2 = st.columns(2)
 
     with c1:
-        if st.button("Compare N-Dimensional Views"):
-            if len(selected_dims) >= 2 and len(selected_dims_2) >= 2:
+        if st.button("Compare Views"):
+            if len(selected_dims) == int(n_main) and len(selected_dims_2) == int(n_compare):
                 diffs = compare_nd_views(df, selected_dims, selected_dims_2)
                 st.session_state.comparison_history.append({
                     "main_dims": selected_dims.copy(),
@@ -260,10 +292,10 @@ if uploaded_file:
                     "diffs": diffs
                 })
             else:
-                st.warning("Both selections must contain at least 2 dimensions.")
+                st.warning("Please select the required number of variables in both views.")
 
     with c2:
-        if st.button("Clear Comparison History"):
+        if st.button("Clear History"):
             st.session_state.comparison_history = []
 
     if st.session_state.comparison_history:
@@ -276,13 +308,25 @@ if uploaded_file:
             left, right = st.columns(2)
 
             with left:
-                render_selection_block(df, item["main_dims"], "First Selection")
+                render_selection_block(
+                    df,
+                    item["main_dims"],
+                    title_prefix=f"First View {idx}",
+                    block_key=f"hist_left_{idx}"
+                )
 
             with right:
-                render_selection_block(df, item["compare_dims"], "Second Selection")
+                render_selection_block(
+                    df,
+                    item["compare_dims"],
+                    title_prefix=f"Second View {idx}",
+                    block_key=f"hist_right_{idx}"
+                )
 
             st.subheader("Comparison Summary")
             for d in item["diffs"]:
                 st.markdown(f"- {d}")
 
             st.markdown("---")
+else:
+    st.info("Upload a CSV file to begin analysis.")
